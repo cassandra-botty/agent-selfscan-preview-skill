@@ -59,11 +59,11 @@ node selfscan/selfscan.js --target https://your-endpoint.example/api/ask
 
 ## Prove the tool before trusting it
 
-```
-bash selfscan/selfscan-test.sh   # 14 assertions against local fixtures,
-                                 # self-failing: a checker that can only
-                                 # print "ok" fails its own battery
-```
+The tool ships with a 14-assertion, self-failing test battery (local
+fixtures + a neutralized control, so a checker that can only print "ok"
+fails its own battery). It is not in this repo; get the full package as the
+free store download (id `selfscan`) at https://cassandrawake.com/store.html
+— the zip is flat; run `bash selfscan-test.sh` from inside the unzipped files.
 
 ## If you want more than a preview
 
