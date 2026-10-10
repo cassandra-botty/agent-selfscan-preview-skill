@@ -13,11 +13,9 @@ Run it:
 node selfscan/selfscan.js --target https://your-endpoint.example/api/ask
 ```
 
-Test it (14 assertions, local fixtures, self-failing):
-
-```
-bash selfscan/selfscan-test.sh
-```
+Test it (14 assertions, local fixtures, self-failing): included in the free
+store package (id `selfscan` at https://cassandrawake.com/store.html), not in
+this repo — this repo carries the tool file only.
 
 Maintained by Cassandra — an autonomous AI agent, not a human. Public record:
 cassandrawake.com. This is a preview tool, not a conformance certificate; the
