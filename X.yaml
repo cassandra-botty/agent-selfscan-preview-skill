@@ -1,0 +1,95 @@
+skill: agent-selfscan-preview
+version: "0.1.0"
+
+catalog: { kind: skill, audience: public, visibility: public, role: canonical }
+
+harness:
+  cases:
+    - name: selfscan-honest-fixture
+      runner: default
+      operator_journeys:
+        - mode: standalone
+          confusors: [web-fetch, extract]
+          request: Run the self-scan preview against its built-in honest 402 fixture and prove the prober saw the gate shape.
+          expected_outcome: The prober answers the honest fixture with zero flags and a gate-shape observation, and the runner confirms correct behavior.
+        - mode: composed
+          request: Reuse the same fixture mode through the advertised default runner without rediscovering the fixture layout.
+          expected_outcome: The runner reuses the packaged fixture and prober unchanged.
+          prior_evidence:
+            - The fixture mode supplied by the prior step.
+          must_not_repeat:
+            - Do not rebuild or re-discover the fixture servers.
+      inputs:
+        mode: happy
+      expect:
+        status: sealed
+    - name: selfscan-leaky-fixture-must-flag
+      runner: default
+      operator_journeys:
+        - mode: standalone
+          confusors: [web-fetch, extract]
+          request: Run the self-scan preview against the leaky fixture and prove the prober catches the open paid path, the junk 5xx, and the private-address literal.
+          expected_outcome: The prober flags all three defects; the runner passes only when all three are caught.
+        - mode: composed
+          request: Reuse the leaky fixture mode through the default runner without re-deriving the expected flags.
+          expected_outcome: The runner reuses the packaged defect oracle unchanged.
+          prior_evidence:
+            - The fixture mode and its expected-flag oracle supplied by the prior step.
+          must_not_repeat:
+            - Do not weaken or restate the expected-flag checks.
+      inputs:
+        mode: leaky
+      expect:
+        status: sealed
+    - name: selfscan-throttle-fixture-inconclusive
+      runner: default
+      operator_journeys:
+        - mode: standalone
+          confusors: [web-fetch, extract]
+          request: Run the self-scan preview against the fully-throttled fixture and prove 429 answers are treated as inconclusive, not defects.
+          expected_outcome: The prober exits clean with no flags and an inconclusive throttle observation; flagging 429 as a defect fails this case.
+        - mode: composed
+          request: Reuse the throttled fixture mode through the default runner unchanged.
+          expected_outcome: The runner reuses the packaged throttle oracle.
+          prior_evidence:
+            - The throttled fixture mode supplied by the prior step.
+          must_not_repeat:
+            - Do not re-probe the fixture beyond the declared request budget.
+      inputs:
+        mode: throttle
+      expect:
+        status: sealed
+    - name: selfscan-private-target-refused
+      runner: default
+      operator_journeys:
+        - mode: standalone
+          confusors: [web-fetch, extract]
+          request: Point the self-scan preview at a private loopback target without the allow-private flag and prove the prober refuses.
+          expected_outcome: The prober refuses the private target before any request; a silent probe run fails this case.
+        - mode: composed
+          request: Reuse the refusal mode through the default runner without enabling private targets.
+          expected_outcome: The runner reuses the packaged refusal oracle unchanged.
+          prior_evidence:
+            - The refusal-mode input supplied by the prior step.
+          must_not_repeat:
+            - Do not add allow-private to make the refusal pass.
+      inputs:
+        mode: reject
+      expect:
+        status: sealed
+
+runners:
+  default:
+    default: true
+    type: cli-tool
+    command: node
+    args: [run.mjs, selfscan/selfscan.js]
+    inputs:
+      mode:
+        type: string
+        required: true
+        description: "happy | leaky | throttle (local fixture proof modes), reject (private-target refusal check), selfuse (scan your own supplied target)."
+      target:
+        type: string
+        required: false
+        description: "Optional live endpoint URL for selfuse mode. Endpoints you own or are authorized to test only."

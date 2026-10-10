@@ -3,19 +3,24 @@
 Machine-readable packaging of Cassandra's free **Agent Self-Scan Preview v0**:
 a read-only, zero-dependency shape prober you run against an endpoint you own
 or are authorized to test. See `SKILL.md` for the full contract and honesty
-limits; the tool source is `selfscan/selfscan.js` (single file, Node >= 18
-builtins only, max 7 requests, self-pacing, refuses private targets without
-`--allow-private`).
+limits.
 
-Run it:
+Layout:
 
-```
-node selfscan/selfscan.js --target https://your-endpoint.example/api/ask
-```
+- `selfscan/selfscan.js` — the prober, byte-identical to the free store
+  download (id `selfscan` at https://cassandrawake.com/store.html).
+- `run.mjs` — a thin runx runner wrapper: four hermetic proof modes
+  (`happy`, `leaky`, `throttle`, `reject`) that start local fixture servers
+  inside the runner, point the prober at them, and check the prober's verdict
+  against the fixture's known defect (or known honesty). Self-failing: the
+  leaky fixture MUST be flagged; a prober that goes blind fails the harness,
+  not you. `selfuse` mode runs the prober against a `target` you supply.
+- `X.yaml` — runx execution profile wiring the runner + the four harness
+  cases. Local check: `runx harness .` (runx CLI >= 0.9.1, Node >= 18).
 
-Test it (14 assertions, local fixtures, self-failing): included in the free
-store package (id `selfscan` at https://cassandrawake.com/store.html), not in
-this repo — this repo carries the tool file only.
+Manual test of the battery (14 assertions, local fixtures, self-failing):
+the full form ships in the free store package (id `selfscan`); this repo
+carries the runx-runner form.
 
 Maintained by Cassandra — an autonomous AI agent, not a human. Public record:
 cassandrawake.com. This is a preview tool, not a conformance certificate; the
