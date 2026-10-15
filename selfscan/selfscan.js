@@ -6,11 +6,21 @@
 // against an endpoint YOU OWN or are authorized to test. It answers one
 // question honestly: "does my endpoint look shape-honest to a machine buyer?"
 //
-// What it is NOT: the paid conformance report. It sends NO payment, settles
-// nothing, replays nothing, and does no chain verification. A clean preview is
-// a green first-layer check, never a conformance certificate. The full report
-// (5 USDC, one real settlement + replay + on-chain verification, published as
-// a permanent signed page) is ordered at /ask.html.
+// What it is NOT: the paid conformance report. It sends NO payment and settles
+// nothing; a clean preview is a green first-layer check, never a conformance
+// certificate. The full report (5 USDC, one real settlement + replay +
+// on-chain verification, published as a permanent signed page) is ordered at
+// /ask.html.
+//
+// ONE opt-in exception to "no chain verification" (wake 202): --check-receiver
+// runs a single FREE, read-only RPC call to ask whether the endpoint's
+// advertised Solana payTo actually holds a token account for the mint it
+// advertises. That is the ecosystem's #1 INVISIBLE x402 defect (documented in
+// x402-trust's failure-modes page and nohumans.directory's FAILURE-MODES.md):
+// a perfectly well-formed 402 whose receiver cannot collect — the payment dies
+// in simulation and nothing ever reaches the seller, and no probe that does not
+// look at the chain can see it. OFF by default so the default run stays
+// chain-free; still read-only, still settles nothing.
 //
 // Semantics inherited from the shop's own audit history (wake 165):
 //   - 429 throttle responses are INCONCLUSIVE, never FAIL. A throttled probe
@@ -30,6 +40,7 @@
 // Usage:
 //   node selfscan.js --target <url> [--path <extra-path>] [--json]
 //                    [--pace <ms>] [--no-pace] [--max <n>] [--allow-private]
+//                    [--check-receiver] [--rpc <url>]
 // Exit codes: 0 = clean or inconclusive (no flags) · 1 = one or more FLAGS
 //             · 2 = could not run (refused target, unreachable, bad input)
 
@@ -52,6 +63,8 @@ const PACE = flag('--no-pace') ? 0 : Number(opt('--pace', 1200));
 const MAXREQ = Math.min(Number(opt('--max', 7)) || 7, 12);
 const ALLOW_PRIVATE = flag('--allow-private');
 const AS_JSON = flag('--json');
+const CHECK_RECEIVER = flag('--check-receiver');
+const RPC_URL = opt('--rpc', 'https://api.mainnet-beta.solana.com');
 const REQ_TIMEOUT_MS = 5000;
 const BODY_CAP = 256 * 1024;
 
@@ -148,6 +161,50 @@ function looksLikeData(r) {
   return r.status === 200 && (r.body || '').length > 40;
 }
 
+// ---- receiver-collectable (wake 202). See the header note. Two failure modes,
+// both invisible without a chain read:
+//   1. the advertised payTo has no token account for the advertised mint, so a
+//      transfer fails in simulation and the seller is never paid;
+//   3. the advertised payTo is the all-zero address, so payments burn.
+const ZERO_ADDR = '11111111111111111111111111111111';   // base58 of 32 zero bytes
+const B58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+function solanaTokenAccepts(body) {
+  let j;
+  try { j = JSON.parse(body); } catch { return []; }
+  const arr = j && j.accepts;
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  for (const a of arr) {
+    if (!a) continue;
+    const net = String(a.network || '');
+    if (!net.toLowerCase().includes('solana')) continue;
+    const payTo = a.payTo || a.pay_to;
+    const mint = a.mint || (a.asset && !/^sol$/i.test(String(a.asset)) ? a.asset : null);
+    if (!payTo || !mint) continue;
+    if (!B58.test(payTo) || !B58.test(mint)) continue;
+    out.push({ scheme: a.scheme || null, network: net, payTo, mint });
+  }
+  return out;
+}
+async function rpcTokenAccounts(payTo, mint) {
+  // One free, read-only mainnet read. Never signs, never sends a payment.
+  const ctl = new AbortController();
+  const to = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const r = await fetch(RPC_URL, {
+      method: 'POST', signal: ctl.signal, headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getTokenAccountsByOwner',
+        params: [payTo, { mint }, { encoding: 'jsonParsed' }] }),
+    });
+    const j = await r.json();
+    if (j.error) return { error: j.error.message || 'rpc_error' };
+    const v = (j.result && j.result.value) || [];
+    return { count: v.length };
+  } catch (e) {
+    return { error: e.name === 'AbortError' ? 'rpc timeout' : (e.message || 'rpc unreachable') };
+  } finally { clearTimeout(to); }
+}
+
 async function main() {
   if (!TARGET) die('no --target given (usage: node selfscan.js --target <url>)');
   let u;
@@ -192,6 +249,7 @@ async function main() {
     const r = await request('GET', fullTarget);
     return { status: r.error || ('http ' + r.status), got: r };
   });
+  let gateBodies = [];   // in scope for the opt-in receiver check below
   if (g1 && g1.got) {
     const p1 = await probe('no-payment POST', async () => {
       const r = await request('POST', fullTarget, '{}');
@@ -217,6 +275,40 @@ async function main() {
       probes.push({ name: 'FLAG inconsistency', status: 'FLAG',
         note: 'two identical no-payment POSTs got different status codes (' +
               p1.got.status + ' then ' + p2.got.status + '); a machine buyer cannot predict this endpoint' });
+    }
+    gateBodies = [p1, p2, g1].filter(x => x && x.got && x.got.body).map(x => x.got.body);
+  }
+
+  // P5: receiver-can-collect — OPT-IN (--check-receiver). One free, read-only
+  // RPC call, no payment. Answers the question no gate-shape probe can: could a
+  // payment to this endpoint actually LAND? Runs outside the target-request
+  // budget (it calls the chain, not the target).
+  let chainRead = false;
+  if (CHECK_RECEIVER) {
+    let acc = null;
+    for (const b of gateBodies) { const a = solanaTokenAccepts(b); if (a.length) { acc = a[0]; break; } }
+    if (!acc) {
+      probes.push({ name: 'receiver check', status: 'info',
+        note: 'no Solana token accept (payTo + mint) in the advertised terms — not applicable to this endpoint' });
+    } else if (acc.payTo === ZERO_ADDR) {
+      probes.push({ name: 'FLAG receiver payTo is the zero address', status: 'FLAG',
+        note: 'the advertised ' + acc.network + ' payTo is the all-zero address — the 402 is valid and payments ' +
+              'settle into a burn; funds sent there are destroyed, not received (x402-trust failure mode 3)' });
+    } else {
+      chainRead = true;
+      const r = await rpcTokenAccounts(acc.payTo, acc.mint);
+      if (r.error) {
+        probes.push({ name: 'receiver check', status: 'info',
+          note: 'chain read for payTo ' + acc.payTo + ' failed (' + r.error + ') — INCONCLUSIVE, not a clean bill' });
+      } else if (r.count === 0) {
+        probes.push({ name: 'FLAG receiver cannot collect', status: 'FLAG',
+          note: 'the advertised payTo ' + acc.payTo + ' has NO token account for mint ' + acc.mint + ' — a payment ' +
+                'would fail in simulation and never reach the seller (x402-trust failure mode 1). Create the token ' +
+                'account before advertising this endpoint.' });
+      } else {
+        probes.push({ name: 'receiver can collect', status: 'OK',
+          note: 'payTo ' + acc.payTo + ' holds ' + r.count + ' token account(s) for ' + acc.mint + ' — a transfer can land' });
+      }
     }
   }
 
@@ -277,6 +369,7 @@ async function main() {
       verdict,
       probes: probes.map(p => ({ name: p.name, status: p.status, note: p.note })),
       preview_only: true,
+      receiver_checked: chainRead,
       paid_report: 'full battery incl. one real settlement + replay + chain verify — order 5 USDC via /ask.html',
     }, null, 1));
   } else {
@@ -288,7 +381,9 @@ async function main() {
     }
     out('');
     out('RESULT: ' + verdict);
-    out('This is a PREVIEW: no payment was sent, nothing settled, no chain verification done.');
+    out(chainRead
+      ? 'This is a PREVIEW: no payment was sent and nothing settled. One free read-only chain read was made (receiver check).'
+      : 'This is a PREVIEW: no payment was sent, nothing settled, no chain read done.');
     out('The full conformance report (one real settlement + replay, signed + published)');
     out('is 5 USDC via /ask.html at cassandra.tail6bec7a.ts.net. Run only against');
     out('endpoints you own or are authorized to test.');
